@@ -31,7 +31,7 @@ def get_logger(filename, verbosity=1, name=None):
 
 class Trainer:
     
-    def __init__(self, model: CorefScore, train_corpus, val_corpus, test_corpus, device="cuda:0", lr=1e-05, steps=100, logfile='./log.txt'):
+    def __init__(self, model: CorefScore, train_corpus, val_corpus, test_corpus, device="cuda:0", lr=1e-06, steps=100, logfile='./log.txt'):
         
         self.train_corpus = list(train_corpus)
         
@@ -98,7 +98,7 @@ class Trainer:
         # print("scores: ", scores.size(), scores)
         gold_indexes = torch.zeros(scores.size()[:-1]).to(self.device)
         non_gold_indexes = torch.zeros(scores.size()[:-1]).to(self.device)
-        loss_fun = FocalLoss(gamma=0)
+        loss_fun = FocalLoss(gamma=2)
         # loss_fun = nn.CrossEntropyLoss()
         # print("spans: ", len(spans))
         # print("scores: ", scores.size())
@@ -127,10 +127,10 @@ class Trainer:
         # loss = - torch.sum(torch.log(torch.sum(torch.mul(scores, gold_indexes), dim=1).clamp_(eps, 1-eps)), dim=0)
         ## cross entropy loss
         
-        scores = torch.cat([scores[gold_indexes.bool()].reshape(-1, 2), scores[non_gold_indexes.bool()].reshape(-1, 2)], dim=0)
-        labels = torch.cat([torch.ones(size=(torch.sum(gold_indexes).long().item(),), device=scores.device), torch.zeros(size=(torch.sum(non_gold_indexes).long().item(),), device=scores.device)], dim=0).long()
-        # scores = torch.cat([scores[i, : len(span.candidate_antecedent_idx), :] for i, span in enumerate(spans)], dim=0)
-        # labels = torch.cat([gold_indexes[i, : len(span.candidate_antecedent_idx)] for i, span in enumerate(spans)], dim=0).long()
+        # scores = torch.cat([scores[gold_indexes.bool()].reshape(-1, 2), scores[non_gold_indexes.bool()].reshape(-1, 2)], dim=0)
+        # labels = torch.cat([torch.ones(size=(torch.sum(gold_indexes).long().item(),), device=scores.device), torch.zeros(size=(torch.sum(non_gold_indexes).long().item(),), device=scores.device)], dim=0).long()
+        scores = torch.cat([scores[i, : len(span.candidate_antecedent_idx), :] for i, span in enumerate(spans)], dim=0)
+        labels = torch.cat([gold_indexes[i, : len(span.candidate_antecedent_idx)] for i, span in enumerate(spans)], dim=0).long()
         # corefs_gen_num = len(labels)
         # print("labeles size: ", labels.size(), " sum(labeles): ", torch.sum(labels))
         # loss = nn.BCELoss()(scores, labels.float())

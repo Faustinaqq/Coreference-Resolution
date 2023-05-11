@@ -88,4 +88,4 @@ if __name__ == '__main__':
     dataset = conll2012(i2w, w2i)
     model = CorefScore(embedding_dim=word_vectors.shape[-1], vocab_size=len(word_vectors), weight=word_vectors).to(device)
     trainer = Trainer(model, dataset.train_dataset, dataset.valid_dataset, dataset.test_dataset, device)
-    trainer.train(100, 20)
+    trainer.train(100, 1)

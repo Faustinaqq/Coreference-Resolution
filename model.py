@@ -8,7 +8,7 @@ import attr
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 class DocumentEncoder(nn.Module):
-    def __init__(self, embedding_dim, hidden_dim, net='lstm', num_embeddings=10000, weight=None, num_layers=2):
+    def __init__(self, embedding_dim, hidden_dim, net='lstm', num_embeddings=5000, weight=None, num_layers=2):
         super(DocumentEncoder, self).__init__()
         
         if weight is not None:
@@ -104,20 +104,22 @@ class SpanFeaure(nn.Module):
         
         self.span_length_layer = Distance(distance_dim)
         
-    def forward(self, states, doc: Document, K=200):
+    def forward(self, embeds, states, doc: Document, K=200):
         spans = doc.create_spans()
         
         if self.attention:
-            attention_embeds, _ = self.attention_layer(states.unsqueeze(1), states.unsqueeze(1), states.unsqueeze(1)) # L * E
+            attention_embeds, _ = self.attention_layer(states.unsqueeze(1), states.unsqueeze(1), embeds.unsqueeze(1)) # L * E
             attention_embeds = attention_embeds.squeeze(1)
         else:
             attention_embeds = states
             
-        attention_embeds = torch.stack([torch.mean(attention_embeds[span.start: span.end + 1], dim=0) for span in spans])
+        attention_embeds = torch.stack([torch.sum(attention_embeds[span.start: span.end + 1], dim=0) for span in spans])
+        
+        span_start_end_state = torch.stack([torch.cat([states[span.start], states[span.end]]) for span in spans])
         
         span_length_embed = self.span_length_layer(torch.tensor([len(span) for span in spans]).to(device))
         
-        span_features = torch.cat([attention_embeds, span_length_embed], dim=1)
+        span_features = torch.cat([attention_embeds, span_start_end_state, span_length_embed], dim=1)
         
         spans = [attr.evolve(span, candidate_antecedent=spans[max(0, idx-K): idx]) for idx, span in enumerate(spans)]
         
@@ -186,7 +188,7 @@ class CorefScore(nn.Module):
         super(CorefScore, self).__init__()
         
         attn_dim = 2 * hidden_dim
-        gi_dim = attn_dim + distance_dim
+        gi_dim = attn_dim * 2 + embedding_dim + distance_dim
         gij_dim = gi_dim * 3 + distance_dim + speaker_dim
         
         self.encoder = DocumentEncoder(embedding_dim, hidden_dim, net, vocab_size, weight)
@@ -194,8 +196,8 @@ class CorefScore(nn.Module):
         self.pairwise_score_layer = PairwiseScore(gij_dim, distance_dim, speaker_dim)
     
     def forward(self, doc: Document):
-        embed, states = self.encoder(doc)
-        spans, span_features = self.span_layer(states, doc)
+        embeds, states = self.encoder(doc)
+        spans, span_features = self.span_layer(embeds, states, doc)
         spans, coref_probs = self.pairwise_score_layer(spans, span_features)
         return spans, coref_probs
     
