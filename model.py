@@ -40,16 +40,30 @@ class DocumentEncoder(nn.Module):
 
 class Speaker(nn.Module):
     
-    def __init__(self, speaker_num=10, speaker_dim=20):
+    def __init__(self, speaker_dim=20):
         super(Speaker, self).__init__()
         
         self.speaker_embed = nn.Sequential(
-            nn.Embedding(speaker_num, speaker_dim, padding_idx=0),
+            nn.Embedding(3, speaker_dim, padding_idx=0),
             nn.Dropout(0.2)
         )
     
     def forward(self, speaker_labeles):
         return self.speaker_embed(speaker_labeles)
+
+
+class PartId(nn.Module):
+    
+    def __init__(self, part_dim=20):
+        super(PartId, self).__init__()
+        
+        self.part_embed = nn.Sequential(
+            nn.Embedding(2, part_dim, padding_idx=0),
+            nn.Dropout(0.2)
+        )
+    
+    def forward(self, speaker_labeles):
+        return self.part_embed(speaker_labeles)
     
 
 class Score(nn.Module):
@@ -113,7 +127,7 @@ class SpanFeaure(nn.Module):
         else:
             attention_embeds = states
             
-        attention_embeds = torch.stack([torch.sum(attention_embeds[span.start: span.end + 1], dim=0) for span in spans])
+        attention_embeds = torch.stack([torch.mean(attention_embeds[span.start: span.end + 1], dim=0) for span in spans])
         
         span_start_end_state = torch.stack([torch.cat([states[span.start], states[span.end]]) for span in spans])
         
@@ -127,16 +141,18 @@ class SpanFeaure(nn.Module):
     
 
 class PairwiseScore(nn.Module):
-    def __init__(self, gij_dim, distance_dim, speaker_dim):
+    def __init__(self, gij_dim, distance_dim, speaker_dim, part_dim):
         super(PairwiseScore, self).__init__()
         self.distance_layer = Distance(distance_dim)
         
-        self.speaker_layer = Speaker(3, speaker_dim)
+        self.speaker_layer = Speaker(speaker_dim)
+        
+        self.part_layer = PartId(part_dim)
         
         self.score = Score(gij_dim)
         
     def forward(self, spans, span_features):
-        mention_ids, antecedent_ids, distances, speakers = zip(*[(span.idx, antecedent.idx, span.end - antecedent.start, self.get_pair_spearker(span, antecedent)) for span in spans for antecedent in span.candidate_antecedent])
+        mention_ids, antecedent_ids, distances, speakers, parts = zip(*[(span.idx, antecedent.idx, span.end - antecedent.start, self.get_pair_spearker(span, antecedent), self.get_pair_part(span, antecedent)) for span in spans for antecedent in span.candidate_antecedent])
                 
         mention_ids = torch.tensor(mention_ids).long().to(device)
         
@@ -146,7 +162,9 @@ class PairwiseScore(nn.Module):
         
         speakers = torch.tensor(speakers).to(device)
         
-        other_feature = torch.cat([self.distance_layer(distances), self.speaker_layer(speakers)], dim=1)
+        parts = torch.tensor(parts).to(device)
+        
+        other_feature = torch.cat([self.distance_layer(distances), self.speaker_layer(speakers), self.part_layer(parts)], dim=1)
         
         gi = span_features[mention_ids]
         
@@ -172,6 +190,8 @@ class PairwiseScore(nn.Module):
         
         probs = pad_and_stack(split_scores)
         
+        probs = torch.softmax(probs, dim=-1)
+        
         return spans, probs
     
     def get_pair_spearker(self, span1: Span, span2: Span):
@@ -180,20 +200,25 @@ class PairwiseScore(nn.Module):
         if span1.speaker == span2.speaker:
             return torch.tensor(1).to(device)
         return torch.tensor(2).to(device)
+    
+    def get_pair_part(self, span1: Span, span2: Span):
+        if span1.part_id == span2.part_id:
+            return torch.tensor(1).to(device)
+        return torch.tensor(0).to(device)
 
 
 class CorefScore(nn.Module):
     
-    def __init__(self, embedding_dim=300, hidden_dim=150, distance_dim=20, speaker_dim=20, vocab_size=100000, net='lstm', attention=True, weight=None):
+    def __init__(self, embedding_dim=300, hidden_dim=150, distance_dim=20, speaker_dim=20, part_dim=20, vocab_size=100000, net='lstm', attention=True, weight=None):
         super(CorefScore, self).__init__()
         
         attn_dim = 2 * hidden_dim
         gi_dim = attn_dim * 2 + embedding_dim + distance_dim
-        gij_dim = gi_dim * 3 + distance_dim + speaker_dim
+        gij_dim = gi_dim * 3 + distance_dim + speaker_dim  + part_dim
         
         self.encoder = DocumentEncoder(embedding_dim, hidden_dim, net, vocab_size, weight)
         self.span_layer = SpanFeaure(attn_dim, distance_dim, attention)
-        self.pairwise_score_layer = PairwiseScore(gij_dim, distance_dim, speaker_dim)
+        self.pairwise_score_layer = PairwiseScore(gij_dim, distance_dim, speaker_dim, part_dim)
     
     def forward(self, doc: Document):
         embeds, states = self.encoder(doc)

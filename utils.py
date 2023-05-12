@@ -1,5 +1,4 @@
 """
-@author: lowinli
 指代消解评测代码
 """
 import itertools
@@ -9,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
+
 
 def get_f1(precision, recall):
     """
@@ -44,6 +44,8 @@ def muc(predicted_clusters, gold_clusters):
     for cluster in gold_clusters:
         gold_edges |= set(itertools.combinations(cluster, 2))
     correct_edges = gold_edges & pred_edges
+    # print("correct_edges: ", correct_edges)
+    # print("predicted_edges: ", pred_edges)
     precision = len(correct_edges) / len(pred_edges) if len(pred_edges) > 0 else 0
     recall = len(correct_edges) / len(gold_edges) if len(gold_edges) > 0 else 0
     f1 = get_f1(precision, recall)
@@ -132,4 +134,4 @@ class FocalLoss(nn.Module):
         pt = torch.exp(-ce_loss)
         focal_loss = (1 - pt) ** self.gamma * ce_loss
         return focal_loss.mean()
-    
+

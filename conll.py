@@ -81,16 +81,13 @@ class conll2012(object):
 
 
 class Document():
-    def __init__(self, doc: dict, max_sen_num=50):
-        # idx = 0
-        # if len(doc['sentences']) > max_sen_num:
-        #     idx = random.sample(range(max_sen_num, len(doc['sentences'])), 1)[0]
+    def __init__(self, doc: dict):
         self.id = doc['id']
-        self.sentences = doc['sentences']  # [idx: idx+max_sen_num]
-        self.spans = doc['spans']  # [idx: idx+max_sen_num]
+        self.sentences = doc['sentences']
+        self.spans = doc['spans']
         self.part_ids = doc['part_ids']
-        self.speakers = doc['speakers']  # [idx: idx+max_sen_num]
-        self.pre_token_num = doc['pre_token_nums']  # [idx: idx+max_sen_num]
+        self.speakers = doc['speakers']
+        self.pre_token_num = doc['pre_token_nums']
         # self.contents = doc['contents']
         self.token_len = self.pre_token_num[-1] + len(self.sentences[-1])
         # print("doc len: ", len(self.sentences))
@@ -117,25 +114,28 @@ class Document():
                 # gold_mentions.append(tmp_span)
                 # gold_contents.append(self.contents[i][span[1]: span[2] + 1])
                 links[span[0]].append(tmp_span)
+        link_cluster = []
         for link in links.values():
-            gold_corefs.extend([coref for coref in combinations(link, 2)])
+            link = sorted(link)
+            if len(link) > 1:
+                gold_corefs.extend([coref for coref in combinations(link, 2)])
+                link_cluster.append(link)
         gold_corefs = sorted(gold_corefs)
-        # gold_mentions = list(set(gold_mentions))
-        link_cluster = list(links.values())
+        # gold_mentions = sorted(list(set(gold_mentions)))
         return gold_corefs, link_cluster
     
     # def get_span_labels(self):
     #     return self.corefs, self.clusters
             
-    def get_spans(self):
-        return self.mentions
+    # def get_spans(self):
+    #     return self.mentions
     
     def create_spans(self):
         # 注释的取决于如何生成span
         created_spans = []
         idx = 0
         for i, sen_spans in enumerate(self.spans):
-            new_sent_spans = [Span(start=span[1] + self.pre_token_num[i], end=span[2] + self.pre_token_num[i], idx=idx + k, speaker=self.speakers[i]) for k, span in enumerate(sen_spans)]
+            new_sent_spans = [Span(start=span[1] + self.pre_token_num[i], end=span[2] + self.pre_token_num[i], idx=idx + k, speaker=self.speakers[i], part_id=self.part_ids[i]) for k, span in enumerate(sen_spans)]
             idx += len(sen_spans)
             created_spans.extend(new_sent_spans)
         return created_spans
@@ -148,6 +148,8 @@ class Span:
     idx = attr.ib()
     # content = attr.ib()
     speaker = attr.ib()
+    part_id = attr.ib()
+    
     candidate_antecedent = attr.ib(default=None)
     candidate_antecedent_idx = attr.ib(default=None)
     # print("len: ", end-start + 1)

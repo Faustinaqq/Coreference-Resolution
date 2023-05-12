@@ -8,7 +8,7 @@ from tqdm import tqdm
 import logging
 import numpy as np
 import networkx as nx
-from utils import muc, ceaf, b_cubed, conll_coref_f1, FocalLoss
+from utils import muc, ceaf, b_cubed, conll_coref_f1, get_f1, FocalLoss
 
 def get_logger(filename, verbosity=1, name=None):
     level_dict = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARNING}
@@ -31,7 +31,7 @@ def get_logger(filename, verbosity=1, name=None):
 
 class Trainer:
     
-    def __init__(self, model: CorefScore, train_corpus, val_corpus, test_corpus, device="cuda:0", lr=1e-06, steps=100, logfile='./log.txt'):
+    def __init__(self, model: CorefScore, train_corpus, val_corpus, test_corpus, device="cuda:0", lr=1e-04, steps=100, logfile='./log.txt'):
         
         self.train_corpus = list(train_corpus)
         
@@ -72,69 +72,75 @@ class Trainer:
         
         # batch = self.train_corpus
         
-        epoch_loss, epoch_corefs, epoch_identified = [], [], []
+        epoch_loss, epoch_precision, epoch_recall, epoch_f1 = [], [], [], []
         
         for doc in tqdm(batch):
-            loss, corefs_found, corefs_chosen, corefs_num, non_corefs_found, non_corefs_chosen, corefs_gen_num = self.train_doc(doc)
-            self.logger.info("Epoch: {}, Document: {} | Loss: {:.6f} | Coref Found: {}/{} | Corefs precision: {}/{}/{} | Non Corefs precision: {}/{}/{}".format(epoch, doc.id, loss, corefs_found, corefs_num, corefs_chosen, corefs_found, corefs_gen_num, non_corefs_chosen, non_corefs_found, corefs_gen_num))
+            loss, find_true_corefs_num, gold_corefs_num, predict_corefs_num, total_predict_num = self.train_doc(doc)
+            precision = find_true_corefs_num / predict_corefs_num if predict_corefs_num > 0 else 0
+            recall = find_true_corefs_num / gold_corefs_num if gold_corefs_num > 0 else 0
+            f1 = get_f1(precision, recall)
+            self.logger.info("Epoch: {}, Document: {} | Loss: {:.6f} | Total Predict: {} | Corefs Precision: {}/{}={:.6f} | Corefs Recall: {}/{}={:.6f} | F1 Score: {}".format(epoch, doc.id, loss, total_predict_num, find_true_corefs_num, predict_corefs_num, precision, find_true_corefs_num, gold_corefs_num, recall, f1))
             epoch_loss.append(loss)
-            epoch_corefs.append(corefs_found / corefs_num if corefs_num != 0 else 0)
-            epoch_identified.append(corefs_chosen / corefs_num if corefs_num != 0 else 0)
+            epoch_precision.append(precision)
+            epoch_recall.append(recall)
+            epoch_f1.append(f1)
+            # epoch_precision.append(corefs_chosen / (corefs_gen_num - non_corefs_chosen + corefs_chosen) if corefs_gen_num - non_corefs_chosen + corefs_chosen != 0 else 0)
+            # epoch_recall.append(corefs_chosen / corefs_num if corefs_num != 0 else 0)
             
         self.scheduler.step()
-        self.logger.info("Epoch: {} | Loss: {:.6f} | Coref recall: {:.6f} | Coref precision: {:.6f}".format(epoch, np.mean(epoch_loss), np.mean(epoch_corefs), np.mean(epoch_identified)))
+        self.logger.info("Epoch: {} | Loss: {:.6f} | Coref precision: {:.6f} | Coref recall: {:.6f} | Coref F1: {:.6f}".format(epoch, np.mean(epoch_loss), np.mean(epoch_precision), np.mean(epoch_recall), np.mean(epoch_f1)))
         
     
     def train_doc(self, doc: Document):
         
         gold_corefs, _ = doc.get_span_labels()
         
-        corefs_num = len(gold_corefs)
+        gold_corefs_num = len(gold_corefs)
         
         self.optimizer.zero_grad()
         
-        corefs_found, corefs_chosen, non_corefs_found, non_corefs_chosen = 0, 0, 0, 0
+        find_true_corefs_num, predict_corefs_num, total_predict_num = 0, 0, 0
         spans, scores = self.model(doc)
         # print("scores: ", scores.size(), scores)
         gold_indexes = torch.zeros(scores.size()[:-1]).to(self.device)
         non_gold_indexes = torch.zeros(scores.size()[:-1]).to(self.device)
-        loss_fun = FocalLoss(gamma=2)
+        # loss_fun = FocalLoss(gamma=2)
         # loss_fun = nn.CrossEntropyLoss()
         # print("spans: ", len(spans))
         # print("scores: ", scores.size())
         # idx = 0
-        corefs_gen_num = 0
         for idx, span in enumerate(spans):
-            corefs_gen_num += len(span.candidate_antecedent_idx)
+            predict_corefs_num += torch.sum(scores[idx, : len(span.candidate_antecedent_idx), 1] > scores[idx, : len(span.candidate_antecedent_idx), 0]).detach().item()
+            total_predict_num += len(span.candidate_antecedent_idx)
             golds = [i for i, link in enumerate(span.candidate_antecedent_idx) if link in gold_corefs]
             non_golds = list(set(range(len(span.candidate_antecedent_idx))).difference(golds))
             if golds:
-                corefs_found += len(golds)
                 gold_indexes[idx, golds] = 1
-                
-                found_corefs = torch.sum(scores[idx, golds, 1] > scores[idx, golds, 0]).detach()
-                
-                corefs_chosen += found_corefs.item()
+                find_true_corefs_num += torch.sum(scores[idx, golds, 1] > scores[idx, golds, 0]).detach().item()
                 
             if non_golds:
-                non_corefs_found += len(non_golds)
+                # non_corefs_found += len(non_golds)
                 non_gold_indexes[idx, non_golds] = 1
-                non_corefs_chosen += torch.sum(scores[idx, non_golds, 0] > scores[idx, non_golds, 1]).detach()
+                # non_corefs_chosen += torch.sum(scores[idx, non_golds, 0] > scores[idx, non_golds, 1]).detach().item()
                     
-        
         # predict_true = found_corefs + not_corefs_found
         # eps = 1e-8
         # loss = - torch.sum(torch.log(torch.sum(torch.mul(scores, gold_indexes), dim=1).clamp_(eps, 1-eps)), dim=0)
         ## cross entropy loss
         
+        # 2 classification
         # scores = torch.cat([scores[gold_indexes.bool()].reshape(-1, 2), scores[non_gold_indexes.bool()].reshape(-1, 2)], dim=0)
         # labels = torch.cat([torch.ones(size=(torch.sum(gold_indexes).long().item(),), device=scores.device), torch.zeros(size=(torch.sum(non_gold_indexes).long().item(),), device=scores.device)], dim=0).long()
-        scores = torch.cat([scores[i, : len(span.candidate_antecedent_idx), :] for i, span in enumerate(spans)], dim=0)
-        labels = torch.cat([gold_indexes[i, : len(span.candidate_antecedent_idx)] for i, span in enumerate(spans)], dim=0).long()
-        # corefs_gen_num = len(labels)
-        # print("labeles size: ", labels.size(), " sum(labeles): ", torch.sum(labels))
-        # loss = nn.BCELoss()(scores, labels.float())
-        loss = loss_fun(scores, labels)
+        # # scores = torch.cat([scores[i, : len(span.candidate_antecedent_idx), :] for i, span in enumerate(spans)], dim=0)
+        # # labels = torch.cat([gold_indexes[i, : len(span.candidate_antecedent_idx)] for i, span in enumerate(spans)], dim=0).long()
+        # loss = loss_fun(scores, labels)
+        
+        loss = 0
+        if torch.sum(gold_indexes) > 0:
+            loss += -torch.mean(torch.log(scores[gold_indexes.bool()].reshape(-1, 2)[:, 1]))
+        if torch.sum(non_gold_indexes) > 0:
+            loss += -torch.mean(torch.log(scores[non_gold_indexes.bool()].reshape(-1, 2)[:, 0]))
+            
         loss.backward()
         param_num = 0
         param_norm = torch.tensor(0.0).to(scores.device)
@@ -146,10 +152,10 @@ class Trainer:
         self.logger.info("Average Gradient Norm: {}".format(torch.mean(param_norm).item()))
         self.optimizer.step()
         
-        return loss.item(), corefs_found, corefs_chosen, corefs_num, non_corefs_found, non_corefs_chosen, corefs_gen_num
+        return loss.item(), find_true_corefs_num, gold_corefs_num, predict_corefs_num, total_predict_num
         
     
-    def evaluate_doc(self, doc):
+    def evaluate_doc(self, doc: Document):
         _, gold_clusters = doc.get_span_labels()
         
         self.model.eval()
@@ -160,12 +166,12 @@ class Trainer:
             
             found_corefs = [link for idx, link in enumerate(span.candidate_antecedent_idx) if scores[i, idx, 1] > scores[i, idx, 0]]
             # if any(found_corefs):
-            graph.add_node((span.start, span.end))
+            # graph.add_node((span.start, span.end))
             for link in found_corefs:
                 graph.add_edge(link[1], link[0])
-
+                
         clusters = list(nx.connected_components(graph))
-        clusters = [list(cluster) for cluster in clusters]
+        clusters = [sorted(list(cluster)) for cluster in clusters]
         
         muc_res = muc(clusters, gold_clusters)
         ceaf_res = ceaf(clusters, gold_clusters) 
