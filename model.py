@@ -1,11 +1,11 @@
 import torch.nn as nn
 import torch
 from conll import Span, Document
-# from boltons.iterutils import pairwise
 from torch.nn.utils.rnn import pad_packed_sequence, pack_sequence
 import attr
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
 
 class DocumentEncoder(nn.Module):
     def __init__(self, embedding_dim, hidden_dim, net='lstm', num_embeddings=5000, weight=None, num_layers=2):
@@ -71,13 +71,13 @@ class Score(nn.Module):
         super(Score, self).__init__()
         
         self.score_layer = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
+            nn.Linear(embed_dim, hidden_dim, bias=False),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim, bias=False),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(hidden_dim, 2)
+            nn.Linear(hidden_dim, 2, bias=False)
         )
     
     def forward(self, x):
@@ -115,7 +115,7 @@ class SpanFeaure(nn.Module):
         
         if attention:
             self.attention_layer = nn.MultiheadAttention(embed_dim=attn_dim, num_heads=1, batch_first=False)
-        
+            
         self.span_length_layer = Distance(distance_dim)
         
     def forward(self, embeds, states, doc: Document, K=200):
@@ -214,7 +214,7 @@ class CorefScore(nn.Module):
         
         attn_dim = 2 * hidden_dim
         gi_dim = attn_dim * 2 + embedding_dim + distance_dim
-        gij_dim = gi_dim * 3 + distance_dim + speaker_dim  + part_dim
+        gij_dim = gi_dim * 3 + distance_dim + speaker_dim + part_dim
         
         self.encoder = DocumentEncoder(embedding_dim, hidden_dim, net, vocab_size, weight)
         self.span_layer = SpanFeaure(attn_dim, distance_dim, attention)

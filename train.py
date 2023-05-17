@@ -1,6 +1,5 @@
 from model import CorefScore
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import random
 from conll import Document
@@ -8,9 +7,14 @@ from tqdm import tqdm
 import logging
 import numpy as np
 import networkx as nx
-from utils import muc, ceaf, b_cubed, conll_coref_f1, get_f1, FocalLoss
+from utils import get_f1, FocalLoss, extract_mentions_to_clusters_from_clusters
+from metrics import CorefEvaluator
+import os
 
 def get_logger(filename, verbosity=1, name=None):
+    cur_dir = os.path.dirname(filename)
+    if not os.path.exists(cur_dir):
+        os.makedirs(cur_dir)
     level_dict = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARNING}
     formatter = logging.Formatter(
         "[%(asctime)s][%(filename)s][line:%(lineno)d][%(levelname)s] %(message)s"
@@ -31,17 +35,18 @@ def get_logger(filename, verbosity=1, name=None):
 
 class Trainer:
     
-    def __init__(self, model: CorefScore, train_corpus, val_corpus, test_corpus, device="cuda:0", lr=1e-04, steps=100, logfile='./log.txt'):
+    def __init__(self, model: CorefScore, train_corpus, val_corpus, test_corpus, device="cuda:0", lr=1e-03, steps=100, logfile='./log.txt'):
         
         self.train_corpus = list(train_corpus)
         
         self.val_corpus = list(val_corpus)
+        
         self.test_corpus = list(test_corpus)
         
         self.model = model.to(device)
         
         self.optimizer = optim.Adam(model.parameters(), lr=lr)
-        
+         
         self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=100, gamma=0.001)
         
         self.logger = get_logger(logfile)
@@ -53,15 +58,29 @@ class Trainer:
     def train(self, epochs, eval_epochs):
         for epoch in range(1, epochs + 1):
             self.train_epoch(epoch)
-        
+            max_f1 = 0
             if epoch % eval_epochs == 0:
                 self.logger.info("Evaluate Validation...")
                 muc_res, ceaf_res, b_cubed_res, conll_coref_f1_res = self.evaluate(self.val_corpus)
                 self.logger.info("validation muc: {}, ceaf: {}, b_cubed: {}, coref_f1:{}".format(muc_res, ceaf_res, b_cubed_res, conll_coref_f1_res))
+                if conll_coref_f1_res > max_f1:
+                    self.logger.info("Epoch: {}, Save Model...".format(epoch))
+                    max_f1 = conll_coref_f1_res
+                    if not os.path.exists("./save"):
+                        os.makedirs("./save")
+                    self.save_model("./save/best_model.pth")
                 
         self.logger.info("Evaluate Test...")
         muc_res, ceaf_res, b_cubed_res, conll_coref_f1_res = self.evaluate(self.test_corpus)
         self.logger.info("test muc: {}, ceaf: {}, b_cubed: {}, coref_f1:{}".format(muc_res, ceaf_res, b_cubed_res, conll_coref_f1_res))
+        
+        # load model and eval:
+        self.logger.info("Load Model ad Evaluate...")
+        self.load_model("best_model.pth")
+        muc_res, ceaf_res, b_cubed_res, conll_coref_f1_res = self.evaluate(self.test_corpus)
+        self.logger.info("test muc: {}, ceaf: {}, b_cubed: {}, coref_f1:{}".format(muc_res, ceaf_res, b_cubed_res, conll_coref_f1_res))
+        
+        
         
 
 
@@ -69,8 +88,6 @@ class Trainer:
         self.model.train()
         
         batch = random.sample(self.test_corpus, self.steps)
-        
-        # batch = self.train_corpus
         
         epoch_loss, epoch_precision, epoch_recall, epoch_f1 = [], [], [], []
         
@@ -84,8 +101,6 @@ class Trainer:
             epoch_precision.append(precision)
             epoch_recall.append(recall)
             epoch_f1.append(f1)
-            # epoch_precision.append(corefs_chosen / (corefs_gen_num - non_corefs_chosen + corefs_chosen) if corefs_gen_num - non_corefs_chosen + corefs_chosen != 0 else 0)
-            # epoch_recall.append(corefs_chosen / corefs_num if corefs_num != 0 else 0)
             
         self.scheduler.step()
         self.logger.info("Epoch: {} | Loss: {:.6f} | Coref precision: {:.6f} | Coref recall: {:.6f} | Coref F1: {:.6f}".format(epoch, np.mean(epoch_loss), np.mean(epoch_precision), np.mean(epoch_recall), np.mean(epoch_f1)))
@@ -101,14 +116,8 @@ class Trainer:
         
         find_true_corefs_num, predict_corefs_num, total_predict_num = 0, 0, 0
         spans, scores = self.model(doc)
-        # print("scores: ", scores.size(), scores)
         gold_indexes = torch.zeros(scores.size()[:-1]).to(self.device)
         non_gold_indexes = torch.zeros(scores.size()[:-1]).to(self.device)
-        # loss_fun = FocalLoss(gamma=2)
-        # loss_fun = nn.CrossEntropyLoss()
-        # print("spans: ", len(spans))
-        # print("scores: ", scores.size())
-        # idx = 0
         for idx, span in enumerate(spans):
             predict_corefs_num += torch.sum(scores[idx, : len(span.candidate_antecedent_idx), 1] > scores[idx, : len(span.candidate_antecedent_idx), 0]).detach().item()
             total_predict_num += len(span.candidate_antecedent_idx)
@@ -119,21 +128,7 @@ class Trainer:
                 find_true_corefs_num += torch.sum(scores[idx, golds, 1] > scores[idx, golds, 0]).detach().item()
                 
             if non_golds:
-                # non_corefs_found += len(non_golds)
                 non_gold_indexes[idx, non_golds] = 1
-                # non_corefs_chosen += torch.sum(scores[idx, non_golds, 0] > scores[idx, non_golds, 1]).detach().item()
-                    
-        # predict_true = found_corefs + not_corefs_found
-        # eps = 1e-8
-        # loss = - torch.sum(torch.log(torch.sum(torch.mul(scores, gold_indexes), dim=1).clamp_(eps, 1-eps)), dim=0)
-        ## cross entropy loss
-        
-        # 2 classification
-        # scores = torch.cat([scores[gold_indexes.bool()].reshape(-1, 2), scores[non_gold_indexes.bool()].reshape(-1, 2)], dim=0)
-        # labels = torch.cat([torch.ones(size=(torch.sum(gold_indexes).long().item(),), device=scores.device), torch.zeros(size=(torch.sum(non_gold_indexes).long().item(),), device=scores.device)], dim=0).long()
-        # # scores = torch.cat([scores[i, : len(span.candidate_antecedent_idx), :] for i, span in enumerate(spans)], dim=0)
-        # # labels = torch.cat([gold_indexes[i, : len(span.candidate_antecedent_idx)] for i, span in enumerate(spans)], dim=0).long()
-        # loss = loss_fun(scores, labels)
         
         loss = 0
         if torch.sum(gold_indexes) > 0:
@@ -165,48 +160,33 @@ class Trainer:
         for i, span in enumerate(spans):
             
             found_corefs = [link for idx, link in enumerate(span.candidate_antecedent_idx) if scores[i, idx, 1] > scores[i, idx, 0]]
-            # if any(found_corefs):
-            # graph.add_node((span.start, span.end))
             for link in found_corefs:
                 graph.add_edge(link[1], link[0])
                 
         clusters = list(nx.connected_components(graph))
         clusters = [sorted(list(cluster)) for cluster in clusters]
+        gold_mentions_to_cluster = extract_mentions_to_clusters_from_clusters(gold_clusters)
+        predict_mentions_to_cluster = extract_mentions_to_clusters_from_clusters(clusters)
+        return clusters, gold_clusters, predict_mentions_to_cluster, gold_mentions_to_cluster
         
-        muc_res = muc(clusters, gold_clusters)
-        ceaf_res = ceaf(clusters, gold_clusters) 
-        b_cubed_res = b_cubed(clusters, gold_clusters)
-        conll_coref_f1_res = (muc_res[-1] + ceaf_res[-1] + b_cubed_res[-1]) / 3
-        
-        return muc_res, ceaf_res, b_cubed_res, conll_coref_f1_res
-        
-    
     def evaluate(self, corpus):
-        muc_list = []
-        ceaf_list = []
-        b_cubed_list = []
-        conll_coref_f1_list = []
-        for doc in corpus:
-            muc_res, ceaf_res, b_cubed_res, conll_coref_f1_res = self.evaluate_doc(doc)
-            self.logger.info("Evaluate Document: {} | MUC: {} | CEAF: {} | B-CUBED: {} | Corefs F1: {}".format(doc.id, muc_res, ceaf_res, b_cubed_res, conll_coref_f1_res))
-            muc_list.append(muc_res)
-            ceaf_list.append(ceaf_res)
-            b_cubed_list.append(b_cubed_res)
-            conll_coref_f1_list.append(conll_coref_f1_res)
-        muc_res = np.array(muc_list).mean(axis=0)
-        ceaf_res = np.array(ceaf_list).mean(axis=0)
-        b_cubed_res = np.array(b_cubed_list).mean(axis=0)
-        conll_coref_f1_res = np.array(conll_coref_f1_list).mean()
-        return muc_res, ceaf_res, b_cubed_res, conll_coref_f1_res
-    
-    
+        coref_evaluater = CorefEvaluator()
+        for doc in tqdm(corpus):
+            clusters, gold_clusters, predict_mentions_to_cluster, gold_mentions_to_cluster = self.evaluate_doc(doc)
+            coref_evaluater.update(clusters, gold_clusters, predict_mentions_to_cluster, gold_mentions_to_cluster)
+        
+        scores = coref_evaluater.get_scores()
+        avg_f1 = (scores[0][-1] + scores[1][-1] + scores[2][-1]) / 3
+            
+        return scores[0], scores[1], scores[2], avg_f1
+        
         
     def save_model(self, savepath):
         """ Save model state dictionary """
-        torch.save(self.model.state_dict(), savepath + '.pth')
+        torch.save(self.model.state_dict(), savepath)
 
 
     def load_model(self, loadpath):
         """ Load state dictionary into model """
         state = torch.load(loadpath)
-        self.model.load_state_dict(state).to(self.device)
+        self.model.load_state_dict(state)
